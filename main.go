@@ -24,6 +24,7 @@ func middlewareCors(next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
+		fmt.Println("Accessed: ", r.URL)
 	})
 }
 
@@ -36,9 +37,19 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 }
 
 func (cfg *apiConfig) metricsRequest(w http.ResponseWriter, request *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(200)
-	w.Write([]byte(fmt.Sprintf("Hits: %v", cfg.fileserverHits)))
+
+	response := fmt.Sprintf(`<html>
+
+	<body>
+		<h1>Welcome, Chirpy Admin</h1>
+		<p>Chirpy has been visited %d times!</p>
+	</body>
+	
+	</html>`, cfg.fileserverHits)
+
+	w.Write([]byte(response))
 }
 
 func (cfg *apiConfig) metricsReset(w http.ResponseWriter, request *http.Request) {
@@ -57,6 +68,9 @@ func main() {
 
 	//Initialize router & apiConfig
 	r := chi.NewRouter()
+	apiR := chi.NewRouter()
+	adminR := chi.NewRouter()
+
 	apiCfg := apiConfig{}
 
 	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir("."))))
@@ -64,11 +78,13 @@ func main() {
 	//Handles routing to different 'directories'
 	r.Handle("/app/*", fsHandler)
 	r.Handle("/app", fsHandler)
-	r.Get("/healthz", h1)
-	r.Get("/metrics", apiCfg.metricsRequest)
-	r.HandleFunc("/reset", apiCfg.metricsReset)
+	apiR.Get("/healthz", h1)
+	adminR.Get("/metrics", apiCfg.metricsRequest)
+	apiR.HandleFunc("/reset", apiCfg.metricsReset)
 
 	corsMux := middlewareCors(r)
+	r.Mount("/api", apiR)
+	r.Mount("/admin", adminR)
 
 	//Initializes the server. Handler wraps ALL HTTP requests
 	srv := &http.Server{
