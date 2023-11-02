@@ -8,10 +8,12 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// Used as a volatile in-memory counter, could be converted to be persistant by saving and reloading to/from disk
 type apiConfig struct {
 	fileserverHits int
 }
 
+// Called with any given HTTP request to the server
 func middlewareCors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -25,6 +27,7 @@ func middlewareCors(next http.Handler) http.Handler {
 	})
 }
 
+// Called with any given call to fsHandler
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg.fileserverHits++
@@ -52,23 +55,28 @@ func main() {
 		w.Write([]byte("OK"))
 	}
 
+	//Initialize router & apiConfig
 	r := chi.NewRouter()
 	apiCfg := apiConfig{}
 
 	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir("."))))
 
+	//Handles routing to different 'directories'
 	r.Handle("/app/*", fsHandler)
 	r.Handle("/app", fsHandler)
 	r.Get("/healthz", h1)
 	r.Get("/metrics", apiCfg.metricsRequest)
 	r.HandleFunc("/reset", apiCfg.metricsReset)
+
 	corsMux := middlewareCors(r)
 
+	//Initializes the server. Handler wraps ALL HTTP requests
 	srv := &http.Server{
 		Addr:    ":8080",
 		Handler: corsMux,
 	}
 
+	//Starts listening indefinitely for requests.
 	log.Fatal(srv.ListenAndServe())
 
 }
