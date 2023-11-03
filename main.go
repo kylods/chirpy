@@ -69,7 +69,7 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 		Body string `json:"body"`
 	}
 
-	type responseValid struct {
+	type response struct {
 		CleanedBody string `json:"cleaned_body"`
 	}
 	decoder := json.NewDecoder(r.Body)
@@ -93,13 +93,11 @@ func postHandler(w http.ResponseWriter, r *http.Request) {
 
 	cleanedChirp := cleanChirp(params.Body)
 
-	respBody := responseValid{
+	respBody := response{
 		CleanedBody: cleanedChirp,
 	}
-	dat, _ := json.Marshal(respBody)
-	w.WriteHeader(200)
-	w.Write(dat)
-	return
+
+	respondWithJSON(w, 200, respBody)
 }
 
 func cleanChirp(dirtyChirp string) string {
@@ -120,7 +118,14 @@ func cleanChirp(dirtyChirp string) string {
 }
 
 func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
-
+	dat, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Error encoding parameters: %s", err)
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+	w.WriteHeader(200)
+	w.Write(dat)
 }
 
 func respondWithError(w http.ResponseWriter, code int, msg string) {
