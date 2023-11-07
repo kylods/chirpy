@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/joho/godotenv"
 	"github.com/kylods/chirpy/internal/database"
 )
 
@@ -18,6 +19,7 @@ var db *database.DB
 
 // Used as a volatile in-memory counter, could be converted to be persistant by saving and reloading to/from disk
 type apiConfig struct {
+	jwtSecret      string
 	fileserverHits int
 }
 
@@ -65,6 +67,33 @@ func (cfg *apiConfig) metricsReset(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 	cfg.fileserverHits = 0
 	w.Write([]byte("Reset Metrics."))
+}
+
+func (cfg *apiConfig) authenticateLogin(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		// these tags indicate how the keys in the JSON should be mapped to the struct fields
+		// the struct fields must be exported (start with a capital letter) if you want them parsed
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		// an error will be thrown if the JSON is invalid or has the wrong types
+		// any missing fields will simply have their values in the struct set to their zero value
+		log.Printf("Error decoding parameters: %s", err)
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+
+	safeUser, err := db.AuthenticateUser(params.Email, params.Password)
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+
+	respondWithJSON(w, 200, safeUser)
 }
 
 func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
@@ -212,35 +241,12 @@ func addUser(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, 201, user)
 }
 
-func authenticateLogin(w http.ResponseWriter, r *http.Request) {
-	type parameters struct {
-		// these tags indicate how the keys in the JSON should be mapped to the struct fields
-		// the struct fields must be exported (start with a capital letter) if you want them parsed
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
-	decoder := json.NewDecoder(r.Body)
-	params := parameters{}
-	err := decoder.Decode(&params)
-	if err != nil {
-		// an error will be thrown if the JSON is invalid or has the wrong types
-		// any missing fields will simply have their values in the struct set to their zero value
-		log.Printf("Error decoding parameters: %s", err)
-		respondWithError(w, 500, "Something went wrong")
-		return
-	}
-
-	safeUser, err := db.AuthenticateUser(params.Email, params.Password)
-	if err != nil {
-		respondWithError(w, 401, err.Error())
-		return
-	}
-
-	respondWithJSON(w, 200, safeUser)
-}
-
 func main() {
+	// by default, godotenv will look for a file named .env in the current directory
+	godotenv.Load()
 	dbPath := "./database.json"
+
+	//Checks for debug flag, deletes database if true
 	dbg := flag.Bool("debug", false, "Enable debug mode")
 	flag.Parse()
 	if *dbg {
@@ -265,6 +271,7 @@ func main() {
 	adminR := chi.NewRouter()
 
 	apiCfg := apiConfig{}
+	apiCfg.jwtSecret = os.Getenv("JWT_SECRET")
 
 	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir("."))))
 
@@ -272,7 +279,7 @@ func main() {
 	r.Handle("/app/*", fsHandler)
 	r.Handle("/app", fsHandler)
 	apiR.Post("/users", addUser)
-	apiR.Post("/login", authenticateLogin)
+	apiR.Post("/login", apiCfg.authenticateLogin)
 	apiR.Get("/chirps", getChirps)
 	apiR.Get("/chirps/{id}", getChirpById)
 	apiR.Post("/chirps", postChirps)
