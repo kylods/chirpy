@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -114,6 +117,30 @@ func getChirps(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, 200, chirps)
 }
 
+func getChirpById(w http.ResponseWriter, r *http.Request) {
+	chirps, err := db.GetChirps()
+	if err != nil {
+		log.Printf("Error loading from db: %v", err)
+		respondWithError(w, 500, err.Error())
+		return
+	}
+	chirpID, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		log.Printf("Error parsing id: %v", err)
+		respondWithError(w, 500, err.Error())
+		return
+	}
+	if chirpID > len(chirps) {
+		respondWithError(w, 404, "Resource does not exist")
+		return
+	}
+
+	chirpIndex := chirpID - 1
+	chirp := chirps[chirpIndex]
+
+	respondWithJSON(w, 200, chirp)
+}
+
 func postChirps(w http.ResponseWriter, r *http.Request) {
 
 	type parameters struct {
@@ -122,9 +149,6 @@ func postChirps(w http.ResponseWriter, r *http.Request) {
 		Body string `json:"body"`
 	}
 
-	type response struct {
-		CleanedBody string `json:"cleaned_body"`
-	}
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
 	err := decoder.Decode(&params)
@@ -155,9 +179,76 @@ func postChirps(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, 201, chirp)
 }
 
+func addUser(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		// these tags indicate how the keys in the JSON should be mapped to the struct fields
+		// the struct fields must be exported (start with a capital letter) if you want them parsed
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		// an error will be thrown if the JSON is invalid or has the wrong types
+		// any missing fields will simply have their values in the struct set to their zero value
+		log.Printf("Error decoding parameters: %s", err)
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+
+	if len(params.Password) == 0 {
+		respondWithError(w, 400, "Password cannot be empty")
+		return
+	}
+	//params is a struct with successfully populated data
+
+	user, err := db.CreateUser(params.Email, params.Password)
+	if err != nil {
+		respondWithError(w, 500, err.Error())
+		return
+	}
+
+	respondWithJSON(w, 201, user)
+}
+
+func authenticateLogin(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		// these tags indicate how the keys in the JSON should be mapped to the struct fields
+		// the struct fields must be exported (start with a capital letter) if you want them parsed
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		// an error will be thrown if the JSON is invalid or has the wrong types
+		// any missing fields will simply have their values in the struct set to their zero value
+		log.Printf("Error decoding parameters: %s", err)
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+
+	safeUser, err := db.AuthenticateUser(params.Email, params.Password)
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+
+	respondWithJSON(w, 200, safeUser)
+}
+
 func main() {
+	dbPath := "./database.json"
+	dbg := flag.Bool("debug", false, "Enable debug mode")
+	flag.Parse()
+	if *dbg {
+		os.Remove(dbPath)
+	}
+
 	var err error
-	db, err = database.NewDB("./database.json")
+	db, err = database.NewDB(dbPath)
 	if err != nil {
 		log.Fatal("Database failed to initialize: ", err)
 	}
@@ -180,7 +271,10 @@ func main() {
 	//Handles routing to different 'directories'
 	r.Handle("/app/*", fsHandler)
 	r.Handle("/app", fsHandler)
+	apiR.Post("/users", addUser)
+	apiR.Post("/login", authenticateLogin)
 	apiR.Get("/chirps", getChirps)
+	apiR.Get("/chirps/{id}", getChirpById)
 	apiR.Post("/chirps", postChirps)
 	apiR.Get("/healthz", h1)
 	adminR.Get("/metrics", apiCfg.metricsRequest)
