@@ -20,6 +20,7 @@ var db *database.DB
 // Used as a volatile in-memory counter, could be converted to be persistant by saving and reloading to/from disk
 type apiConfig struct {
 	jwtSecret      string
+	polkaAPiKey    string
 	fileserverHits int
 }
 
@@ -87,12 +88,65 @@ func (cfg *apiConfig) authenticateLogin(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	safeUser, err := db.AuthenticateUser(params.Email, params.Password)
+	userToken, err := db.AuthenticateUser(params.Email, params.Password, cfg.jwtSecret)
 	if err != nil {
 		respondWithError(w, 401, err.Error())
 		return
 	}
 
+	respondWithJSON(w, 200, userToken)
+}
+
+func (cfg *apiConfig) renewToken(w http.ResponseWriter, r *http.Request) {
+	refreshTokenStr := r.Header.Get("Authorization")
+	refreshTokenStr = strings.TrimPrefix(refreshTokenStr, "Bearer ")
+
+	accessToken, err := db.RenewToken(refreshTokenStr, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+	respondWithJSON(w, 200, accessToken)
+}
+
+func (cfg *apiConfig) revokeToken(w http.ResponseWriter, r *http.Request) {
+	refreshTokenStr := r.Header.Get("Authorization")
+	refreshTokenStr = strings.TrimPrefix(refreshTokenStr, "Bearer ")
+
+	err := db.RevokeToken(refreshTokenStr, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+	respondWithJSON(w, 200, nil)
+}
+
+func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		// these tags indicate how the keys in the JSON should be mapped to the struct fields
+		// the struct fields must be exported (start with a capital letter) if you want them parsed
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		// an error will be thrown if the JSON is invalid or has the wrong types
+		// any missing fields will simply have their values in the struct set to their zero value
+		log.Printf("Error decoding parameters: %s", err)
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+
+	tokenString := r.Header.Get("Authorization")
+	tokenString = strings.TrimPrefix(tokenString, "Bearer ")
+
+	safeUser, err := db.UpdateUser(tokenString, params.Email, params.Password, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
 	respondWithJSON(w, 200, safeUser)
 }
 
@@ -170,14 +224,14 @@ func getChirpById(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, 200, chirp)
 }
 
-func postChirps(w http.ResponseWriter, r *http.Request) {
-
+func (cfg *apiConfig) postChirps(w http.ResponseWriter, r *http.Request) {
+	tokenStr := r.Header.Get("Authorization")
+	tokenStr = strings.TrimPrefix(tokenStr, "Bearer ")
 	type parameters struct {
 		// these tags indicate how the keys in the JSON should be mapped to the struct fields
 		// the struct fields must be exported (start with a capital letter) if you want them parsed
 		Body string `json:"body"`
 	}
-
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
 	err := decoder.Decode(&params)
@@ -188,7 +242,6 @@ func postChirps(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, 500, "Something went wrong")
 		return
 	}
-
 	//params is a struct with successfully populated data
 
 	if len(params.Body) > 140 {
@@ -199,13 +252,31 @@ func postChirps(w http.ResponseWriter, r *http.Request) {
 
 	cleanedChirp := cleanChirp(params.Body)
 
-	chirp, err := db.CreateChirp(cleanedChirp)
+	chirp, err := db.CreateChirp(cleanedChirp, tokenStr, cfg.jwtSecret)
 	if err != nil {
 		log.Printf("Error saving chirp to db: %v", err)
 		respondWithError(w, 500, err.Error())
 	}
 
 	respondWithJSON(w, 201, chirp)
+}
+
+func (cfg *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
+	tokenStr := r.Header.Get("Authorization")
+	tokenStr = strings.TrimPrefix(tokenStr, "Bearer ")
+	chirpID, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		log.Printf("Error parsing id: %v", err)
+		respondWithError(w, 500, err.Error())
+		return
+	}
+
+	err = db.DeleteChirp(chirpID, tokenStr, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, 403, err.Error())
+		return
+	}
+	respondWithJSON(w, 200, nil)
 }
 
 func addUser(w http.ResponseWriter, r *http.Request) {
@@ -241,6 +312,45 @@ func addUser(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, 201, user)
 }
 
+func (cfg *apiConfig) polkaWebhook(w http.ResponseWriter, r *http.Request) {
+	apiKey := r.Header.Get("Authorization")
+	apiKey = strings.TrimPrefix(apiKey, "ApiKey ")
+	if apiKey != cfg.polkaAPiKey {
+		respondWithError(w, 401, "Unauthorized")
+		return
+	}
+	type Data struct {
+		UserID int `json:"user_id"`
+	}
+	type parameters struct {
+		Event string `json:"event"`
+		Data  Data   `json:"data"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		// an error will be thrown if the JSON is invalid or has the wrong types
+		// any missing fields will simply have their values in the struct set to their zero value
+		log.Printf("Error decoding parameters: %s", err)
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+
+	switch event := params.Event; event {
+	case "user.upgraded":
+		err = db.UpgradeUser(params.Data.UserID)
+		if err != nil {
+			respondWithError(w, 404, err.Error())
+			return
+		}
+		respondWithJSON(w, 200, nil)
+	default:
+		respondWithJSON(w, 200, nil)
+	}
+
+}
+
 func main() {
 	// by default, godotenv will look for a file named .env in the current directory
 	godotenv.Load()
@@ -271,6 +381,7 @@ func main() {
 	adminR := chi.NewRouter()
 
 	apiCfg := apiConfig{}
+	apiCfg.polkaAPiKey = os.Getenv("POLKA_API_KEY")
 	apiCfg.jwtSecret = os.Getenv("JWT_SECRET")
 
 	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir("."))))
@@ -279,10 +390,15 @@ func main() {
 	r.Handle("/app/*", fsHandler)
 	r.Handle("/app", fsHandler)
 	apiR.Post("/users", addUser)
+	apiR.Put("/users", apiCfg.updateUser)
+	apiR.Post("/refresh", apiCfg.renewToken)
 	apiR.Post("/login", apiCfg.authenticateLogin)
+	apiR.Post("/revoke", apiCfg.revokeToken)
+	apiR.Post("/polka/webhooks", apiCfg.polkaWebhook)
+	apiR.Delete("/chirps/{id}", apiCfg.deleteChirp)
 	apiR.Get("/chirps", getChirps)
 	apiR.Get("/chirps/{id}", getChirpById)
-	apiR.Post("/chirps", postChirps)
+	apiR.Post("/chirps", apiCfg.postChirps)
 	apiR.Get("/healthz", h1)
 	adminR.Get("/metrics", apiCfg.metricsRequest)
 	apiR.HandleFunc("/reset", apiCfg.metricsReset)
